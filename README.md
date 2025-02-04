@@ -1,5 +1,7 @@
 # tuya_mcp_server MCP server
 
+[![smithery badge](https://smithery.ai/badge/@cabra-lat/tuya-mcp-server)](https://smithery.ai/server/@cabra-lat/tuya-mcp-server)
+
 A MCP server for Tuya devices
 
 ## Components
@@ -31,6 +33,14 @@ The server implements one tool:
 ## Quickstart
 
 ### Install
+
+### Installing via Smithery
+
+To install Tuya MCP Server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@cabra-lat/tuya-mcp-server):
+
+```bash
+npx -y @smithery/cli install @cabra-lat/tuya-mcp-server --client claude
+```
 
 #### Claude Desktop
 
