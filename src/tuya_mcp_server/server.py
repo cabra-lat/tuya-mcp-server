@@ -6,6 +6,7 @@ import threading
 import numpy as np
 from scipy.fft import fft
 
+tuyad_process = None
 from mcp.server.models import InitializationOptions
 import mcp.types as types
 from mcp.server import NotificationOptions, Server
@@ -13,6 +14,36 @@ from pydantic import AnyUrl
 import mcp.server.stdio
 import tinytuya
 import sys
+import os
+import asyncio
+
+async def start_tuyad():
+    try:
+        process = await asyncio.create_subprocess_exec(
+            '/home/cabra.lat/documents/coding/tuya/tuya_mcp_server/tuyad',  # Replace with the actual path to tuyad
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        print("tuyad started")
+        return process
+    except Exception as e:
+        print(f"Error starting tuyad: {e}")
+        return None
+
+async def stop_tuyad(process):
+    if process:
+        try:
+            process.terminate()
+            await process.wait()
+            print("tuyad stopped")
+        except Exception as e:
+            print(f"Error stopping tuyad: {e}")
+
+async def is_tuyad_running(process):
+    if process and process.returncode is None:
+        return True
+    return False
+
 import os
 
 DEVICES_FILE    = os.environ.get('DEVICES', os.path.expanduser('~/snapshot.json'))
@@ -249,6 +280,13 @@ async def handle_list_tools() -> list[types.Tool]:
     ]
 
 
+        types.Tool(
+            name="restart_tuyad",
+            description="Restart the tuyad daemon",
+        ),
+    ]
+
+
 @server.call_tool()
 async def handle_call_tool(
     name: str, arguments: dict | None
@@ -273,6 +311,9 @@ async def handle_call_tool(
          return await handle_set_mode(arguments)
     if name == "music":
          return await handle_music(arguments)
+
+    if name == "restart_tuyad":
+        return await handle_restart_tuyad()
 
     raise ValueError(f"Unknown tool: {name}")
 
@@ -477,10 +518,20 @@ async def handle_music(arguments):
 
     raise ValueError("No matching devices found")
 
+async def handle_restart_tuyad():
+    global tuyad_process
+    if await is_tuyad_running(tuyad_process):
+        await stop_tuyad(tuyad_process)
+    tuyad_process = await start_tuyad()
+    return [types.TextContent(type="text", text="tuyad daemon restarted.")]
+
+
 async def main():
     # Load devices from snapshot.json
     if load_devices().get("status") != "success":
         return
+
+    tuyad_process = await start_tuyad()
 
     # Run the server using stdin/stdout streams
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
@@ -496,6 +547,9 @@ async def main():
                 ),
             ),
         ))
+
+    if tuyad_process:
+        await stop_tuyad(tuyad_process)
 
 if __name__ == "__main__":
     asyncio.run(run())

@@ -5,6 +5,7 @@ description = "A MCP server for Tuya devices"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+ "flask>=3.1.0",
  "mcp[cli]>=1.2.1",
  "numpy>=2.2.2",
  "scipy>=1.15.1",

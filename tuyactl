@@ -1,0 +1,155 @@
+#!/usr/bin/env python
+import requests
+import json
+import sys
+import argparse
+
+BASE_URL = 'http://localhost:5000'
+
+def send_command(command, parameters=None):
+    url = f'{BASE_URL}/{command}'
+    headers = {'Content-type': 'application/json'}
+    try:
+        if parameters:
+            print(f"Sending command: {url} with parameters {parameters}")
+            response = requests.post(url, headers=headers, data=json.dumps(parameters))
+        else:
+            print(f"Sending command: {url}")
+            response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error: {e}")
+        return {"status": "error", "message": str(e)}
+
+def main():
+    parser = argparse.ArgumentParser(description='Control Tuya devices.')
+    subparsers = parser.add_subparsers(title='commands', dest='command', help='Available commands')
+
+    # Device list command
+    device_list_parser = subparsers.add_parser('list', help='List all devices')
+
+    # Turn on command
+    on_parser = subparsers.add_parser('on', help='Turn on a device')
+    on_parser.add_argument('--device', type=str,  help='Device name')
+    on_parser.add_argument('--all', action='store_true', help='Turn on all devices')
+
+    # Turn off command
+    off_parser = subparsers.add_parser('off', help='Turn off a device')
+    off_parser.add_argument('--device', type=str, help='Device name')
+    off_parser.add_argument('--all', action='store_true', help='Turn off all devices')
+
+    # Set color command
+    color_parser = subparsers.add_parser('color', help='Set the color of a device')
+    color_parser.add_argument('color', type=str, help='Color value')
+    color_parser.add_argument('--device', type=str,  help='Device name')
+    color_parser.add_argument('--all', action='store_true', help='Set color for all devices')
+
+    # Set brightness command
+    brightness_parser = subparsers.add_parser('brightness', help='Set the brightness of a device')
+    brightness_parser.add_argument('brightness', type=int, help='Brightness value')
+    brightness_parser.add_argument('--device', type=str, help='Device name')
+    brightness_parser.add_argument('--all', action='store_true', help='Set brightness for all devices')
+
+    # Set colour temperature command
+    colourtemp_parser = subparsers.add_parser('colourtemp', help='Set the colour temperature of a device')
+    colourtemp_parser.add_argument('colourtemp', type=int,  help='Colour temperature value')
+    colourtemp_parser.add_argument('--device', type=str, help='Device name')
+    colourtemp_parser.add_argument('--all', action='store_true', help='Set colour temperature for all devices')
+
+    # Set mode command
+    mode_parser = subparsers.add_parser('mode', help='Set the mode of a device')
+    mode_parser.add_argument('mode', type=str, choices=['white', 'colour', 'scene', 'music'], help='Mode value')
+    mode_parser.add_argument('--device', type=str, help='Device name')
+    mode_parser.add_argument('--all', action='store_true', help='Set mode for all devices')
+
+    # Music sim command
+    music_parser = subparsers.add_parser('music', help='Simulate music mode for a device')
+    music_parser.add_argument('--device', type=str, help='Device name')
+    music_parser.add_argument('--delay', type=float, default=0.1, help='Delay value')
+    music_parser.add_argument('--all', action='store_true', help='Music mode using all devices')
+
+    # Restart tuyad command
+    restart_parser = subparsers.add_parser('restart_tuyad', help='Restart the tuyad daemon')
+
+    args = parser.parse_args()
+
+    parameters = {}
+    command = args.command
+    if args.command == 'on':
+        command = 'turn_on'
+        if args.all:
+            parameters["all"] = True
+        elif args.device:
+            parameters["device"] = args.device
+        else:
+            print("Error: Device name required when not using --all")
+            sys.exit(1)
+    elif args.command == 'off':
+        if args.all:
+            command = 'turn_off'
+            parameters["all"] = True
+        elif args.device:
+            command = 'turn_off'
+            parameters["device"] = args.device
+        else:
+          print("Error: Device name required when not using --all")
+          sys.exit(1)
+
+    elif args.command == 'color':
+        command = 'set_color'
+        if args.all:
+            parameters["all"] = True
+        elif hasattr(args, 'device'):
+            parameters["device"] = args.device
+        if hasattr(args, 'color'):
+            parameters["color"] = args.color
+
+    elif args.command == 'brightness':
+        command = 'set_brightness'
+        if args.all:
+            parameters["all"] = True
+        elif hasattr(args, 'device'):
+            parameters["device"] = args.device
+        if hasattr(args, 'brightness'):
+            parameters["brightness"] = args.brightness
+    elif args.command == 'colourtemp':
+        command = 'set_colourtemp'
+        if args.all:
+            parameters["all"] = True
+        elif hasattr(args, 'device'):
+            parameters["device"] = args.device
+        if hasattr(args, 'colourtemp'):
+            parameters["colourtemp"] = args.colourtemp
+
+    elif args.command == 'mode':
+        command = 'set_mode'
+        if args.all:
+            parameters["all"] = True
+        elif hasattr(args, 'device'):
+            parameters["device"] = args.device
+        if hasattr(args, 'mode'):
+            parameters["mode"] = args.mode
+
+    elif args.command == 'music':
+        if args.all:
+            parameters["all"] = True
+        elif hasattr(args, 'device'):
+            parameters["device"] = args.device
+        if hasattr(args, 'delay'):
+            parameters["delay"] = args.delay
+
+
+    if command:
+        result = send_command(command, parameters if parameters else None)
+        if command == 'list':
+            for device in result:
+                print(device)
+            return
+        print(json.dumps(result))
+        return
+
+    print("Error: Invalid command")
+
+if __name__ == '__main__':
+    main()
