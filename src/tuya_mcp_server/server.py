@@ -15,7 +15,9 @@ import tinytuya
 import sys
 import os
 
-DEVICES_FILE = os.environ.get('DEVICES', 'snapshot.json')  # Use environment variable, default to snapshot.json
+DEVICES_FILE    = os.environ.get('DEVICES', os.path.expanduser('~/snapshot.json'))
+XDG_RUNTIME_DIR = os.environ.get('XDG_RUNTIME_DIR',f'/run/user/{os.getuid()}')
+AUDIO_TARGET    = os.environ.get('TUYA_MCP_AUDIO_TARGET', 'alsa_output.pci-0000_00_1b.0.analog-stereo.monitor')
 
 devices = []
 
@@ -448,7 +450,8 @@ async def handle_music(arguments):
 
                 # Create a separate audio stream for each device
                 process = subprocess.Popen(
-                    ['parec', '-d', 'alsa_output.pci-0000_00_1b.0.analog-stereo.monitor', '--format=s16le', '--rate=44100'], 
+                    ['parec', '-d', AUDIO_TARGET, '--format=s16le', '--rate=44100'], 
+                    env={ 'XDG_RUNTIME_DIR': XDG_RUNTIME_DIR },
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
 
@@ -456,13 +459,9 @@ async def handle_music(arguments):
                     try:
                         while True:
                             stdout = process.stdout.read(44100)
-                            if not stdout:
-                                d.set_hsv(0, 0, 0, nowait=True)
-                                continue
                             audio_data = np.frombuffer(stdout, dtype=np.int16).astype(float)
                             hue, saturation, value = parse_audio(audio_data, freq_range)
                             d.set_hsv(hue / 360.0, saturation / 1000.0, value / 1000.0, nowait=True)
-                            time.sleep(delay)
                     except Exception as e:
                         print(f"Error in audio processing thread: {e}")
 
