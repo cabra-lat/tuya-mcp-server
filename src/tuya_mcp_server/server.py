@@ -15,13 +15,21 @@ import tinytuya
 import sys
 import os
 import mcp.server.stdio
-import queue
-import threading
 
+<<<<<<< Updated upstream
 DEVICES_FILE = os.environ.get('TUYA_MCP_DEVICES_FILE', os.path.expanduser('~/snapshot.json'))
 SINKORSOURCE = os.environ.get('TUYA_MCP_AUDIO_MONITOR', 'alsa_output.pci-0000_00_1b.0.analog-stereo.monitor')
 SAMPLE_RATE  = os.environ.get('TUYA_MCP_AUDIO_SAMPLE_RATE', 48000)
 XDG_RUNTIME_DIR = os.environ.get('XDG_RUNTIME_DIR',f'/run/user/{os.geteuid()}')
+=======
+
+
+TUYA_MCP_AUDIO_TARGET      = os.environ.get('TUYA_MCP_AUDIO_TARGET',      'alsa_output.pci-0000_00_1b.0.analog-stereo')
+TUYA_MCP_AUDIO_SAMPLE_RATE = os.environ.get('TUYA_MCP_AUDIO_SAMPLE_RATE', 48000)
+TUYA_MCP_AUDIO_CHANNELS    = os.environ.get('TUYA_MCP_AUDIO_CHANNELS',    2)
+TUYA_MCP_DEVICES_FILE      = os.environ.get('TUYA_MCP_DEVICES_FILE',      os.path.expanduser('~/snapshot.json'))
+XDG_RUNTIME_DIR            = os.environ.get('XDG_RUNTIME_DIR',            f'/run/user/{os.geteuid()}')
+>>>>>>> Stashed changes
 
 # Configure logging
 logging.basicConfig(
@@ -30,22 +38,23 @@ logging.basicConfig(
 
 devices = []
 music_processes = {}
-audio_buffer = queue.Queue()
+audio_buffer = asyncio.Queue()
+read_audio_task = None
 
 server = Server("tuya_mcp_server")
 
 def load_devices():
     global devices
     try:
-        with open(DEVICES_FILE, 'r') as f:
+        with open(TUYA_MCP_DEVICES_FILE, 'r') as f:
             devices = json.load(f).get("devices", [])
         return {"status": "success"}
     except FileNotFoundError:
-        print(f"Error: {DEVICES_FILE} not found.")
-        return {"status": "error", "message": f"Error: {DEVICES_FILE} not found."}
+        print(f"Error: {TUYA_MCP_DEVICES_FILE} not found.")
+        return {"status": "error", "message": f"Error: {TUYA_MCP_DEVICES_FILE} not found."}
     except json.JSONDecodeError:
-        print(f"Error: Invalid JSON format in {DEVICES_FILE}.")
-        return {"status": "error", "message": f"Error: Invalid JSON format in {DEVICES_FILE}."}
+        print(f"Error: Invalid JSON format in {TUYA_MCP_DEVICES_FILE}.")
+        return {"status": "error", "message": f"Error: Invalid JSON format in {TUYA_MCP_DEVICES_FILE}."}
 
 def parse_audio(audio_data, sample_rate, freq_range):
     n = len(audio_data)
@@ -73,7 +82,10 @@ def parse_audio(audio_data, sample_rate, freq_range):
     saturation = min(amplitude / 10000, 1.0) * 1000  
     value = min(amplitude / 5000, 1.0) * 1000  
 
-    return hue, saturation, value
+    beat_threshold = 5000 # Adjust this value based on testing
+    is_beat = amplitude > beat_threshold
+
+    return hue, saturation, value, is_beat
 
 
 color_names = {
@@ -126,7 +138,8 @@ async def control_device(device, action, *args, function_name='', **kwargs):
         await asyncio.to_thread(function, *args, **kwargs)
 
     except Exception as e:
-        print(f"Error controlling device {device.get('name', 'unknown')}: {e}")
+        logging.error(f"Error controlling device {device.get('name', 'unknown')}: {e}")
+        raise
 
 @server.list_resources()
 async def handle_list_resources() -> list[types.Resource]:
@@ -437,16 +450,24 @@ async def handle_stop_music(arguments):
     if not all_devices and not device_name:
         raise ValueError("Device or all must be provided")
 
+    if all_devices:
+        read_audio_task = music_processes.get('read_audio_task')
+        if read_audio_task: 
+            read_audio_task.cancel()
+            try:
+                await read_audio_task # Ensure the task finishes
+            except asyncio.CancelledError:
+                pass  # Expected behavior
+        return [types.TextContent(type="text", text=f"All devices stopped.")]
+
     tasks = [
         stop_music(device.get('name'))
         for device in devices
-        if device.get('name') == device_name or all_devices
+        if device.get('name') == device_name
     ]
 
     if tasks:
         await asyncio.gather(*tasks)
-        if all_devices:
-            return [types.TextContent(type="text", text=f"All devices stopped.")]
         return [types.TextContent(type="text", text=f"Device {device_name} stopped.")]
 
     raise ValueError(f"Device {device_name} not found")
@@ -474,46 +495,53 @@ async def music_process(device, delay, freq_range):
     d.set_version(version)
     d.set_socketPersistent(True)
 
+    logging.info(f"Music process for {device['name']} started.")
+
     try:
         while True:
-            audio_data = audio_buffer.get()
-            hue, saturation, value = parse_audio(audio_data, SAMPLE_RATE, freq_range)
-            logging.info(f"Audio data processed: Hue: {hue}, Saturation: {saturation}, Value: {value}")
-            d.set_hsv(hue / 360.0, saturation / 1000.0, value / 1000.0, nowait=True)
+            audio_data = await audio_buffer.get()
+            hue, saturation, value, is_beat = parse_audio(audio_data, TUYA_MCP_AUDIO_SAMPLE_RATE, freq_range)
+            d.set_hsv(hue, saturation, value, nowait=True)
+            if is_beat:
+                d.turn_on(nowait=True)
+            else:
+                d.turn_off(nowait=True)
             await asyncio.sleep(delay)
 
     except asyncio.CancelledError:
         logging.info(f"Music process for {device['name']} cancelled.")
-    except Exception as e:
-        logging.error(f"Error in music_process: {e}")
+        raise
 
-
-def read_audio_thread():
-    process = subprocess.Popen(
-        [
-            'pw-record',
-            f'--target={SINKORSOURCE}',
-            f'--rate={SAMPLE_RATE}',
-            '-',
-        ],
+async def read_audio(delay):
+    process = await asyncio.create_subprocess_exec(
+        'parec',
+        f'--device={TUYA_MCP_AUDIO_TARGET}',
+        f'--rate={TUYA_MCP_AUDIO_SAMPLE_RATE}',
         env={'XDG_RUNTIME_DIR': XDG_RUNTIME_DIR},
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
     )
 
-    logging.info(f"Process parec listening to {SINKORSOURCE}. env XDG_RUNTIME_DIR={XDG_RUNTIME_DIR}")
+    logging.info(f"Listening to {TUYA_MCP_AUDIO_TARGET} env XDG_RUNTIME_DIR={XDG_RUNTIME_DIR}")
 
-    while True:
-        data = process.stdout.read(SAMPLE_RATE)
-        audio_data = np.frombuffer(data, dtype=np.int16).astype(float)
-        audio_buffer.put(audio_data)
-
-
+    try:
+        while True:
+            data = await process.stdout.read(TUYA_MCP_AUDIO_SAMPLE_RATE * TUYA_MCP_AUDIO_CHANNELS)
+            audio_data = np.frombuffer(data, dtype=np.int16).astype(float)
+            try:
+                audio_buffer.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            await audio_buffer.put(audio_data)
+            #await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        logging.info(f"Stop Listening audio.")
+        raise
 
 async def handle_music(arguments):
     all_devices = arguments.get('all', False)
     device_name = arguments.get('device')
-    delay = arguments.get('delay', 0.1)
+    delay = arguments.get('delay', 0.01)
 
     if not all_devices and not device_name:
         raise ValueError("device name must be provided")
@@ -523,10 +551,14 @@ async def handle_music(arguments):
     except ValueError:
         raise ValueError("delay must be a float")
 
-    min_freq, max_freq = 100, 2000
+    min_freq, max_freq = 10, 2000
     num_devices = len(devices)
     if num_devices == 0:
         raise ValueError("No devices configured")
+
+    # Start the audio reading task
+    read_audio_task = asyncio.create_task(read_audio(delay))
+    music_processes['read_audio_task'] = read_audio_task
 
     step = (max_freq - min_freq) // num_devices
     frequency_ranges = [(min_freq + i * step, min_freq + (i + 1) * step) for i in range(num_devices)]
@@ -549,10 +581,6 @@ async def main():
     # Load devices from snapshot.json
     if load_devices().get("status") != "success":
         return
-
-    # Start the audio reading thread
-    audio_thread = threading.Thread(target=read_audio_thread, daemon=True)
-    audio_thread.start()
 
     # Run the server using stdin/stdout streams
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
