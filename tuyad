@@ -12,7 +12,9 @@ import numpy as np
 from scipy.fft import fft
 from flask import Flask, request, jsonify
 
-DEVICES_FILE = 'snapshot.json'
+DEVICES_FILE    = os.environ.get('DEVICES', os.path.expanduser('~/snapshot.json'))
+XDG_RUNTIME_DIR = os.environ.get('XDG_RUNTIME_DIR',f'/run/user/{os.getuid()}')
+AUDIO_TARGET    = os.environ.get('TUYA_MCP_AUDIO_TARGET', 'alsa_output.pci-0000_00_1b.0.analog-stereo.monitor')
 devices = []
 
 app = Flask(__name__)
@@ -247,7 +249,8 @@ def music():
 
                 # Create a separate audio stream for each device
                 process = subprocess.Popen(
-                    ['parec', '-d', 'alsa_output.pci-0000_00_1b.0.analog-stereo.monitor', '--format=s16le', '--rate=44100'], 
+                    ['parec', '-d', AUDIO_TARGET, '--format=s16le', '--rate=44100'], 
+                    env={ 'XDG_RUNTIME_DIR': XDG_RUNTIME_DIR },
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
 

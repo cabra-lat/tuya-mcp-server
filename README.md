@@ -45,7 +45,7 @@ On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
       "command": "uv",
       "args": [
         "--directory",
-        "/home/cabra.lat/documents/coding/tuya/tuya_mcp_server",
+        "<path-to-your-development-files>/tuya_mcp_server",
         "run",
         "tuya_mcp_server"
       ]
@@ -104,7 +104,7 @@ experience, we strongly recommend using the [MCP Inspector](https://github.com/m
 You can launch the MCP Inspector via [`npm`](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm) with this command:
 
 ```bash
-npx @modelcontextprotocol/inspector uv --directory /home/cabra.lat/documents/coding/tuya/tuya_mcp_server run tuya-mcp-server
+npx @modelcontextprotocol/inspector uv --directory <path-to-your-development-files>/tuya_mcp_server run tuya-mcp-server
 ```
 
 
