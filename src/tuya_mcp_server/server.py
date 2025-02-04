@@ -1,8 +1,8 @@
+import logging
 import asyncio
 import json
 import time
 import subprocess
-import threading
 import numpy as np
 from scipy.fft import fft
 
@@ -15,9 +15,18 @@ import tinytuya
 import sys
 import os
 
-DEVICES_FILE = os.environ.get('DEVICES', 'snapshot.json')  # Use environment variable, default to snapshot.json
+DEVICES_FILE = os.environ.get('TUYA_MCP_DEVICES_FILE', 'snapshot.json')
+SINKORSOURCE = os.environ.get('TUYA_MCP_PULSEAUDIO_SINK', 'alsa_output.pci-0000_00_1b.0.analog-stereo.monitor')
+SAMPLE_RATE  = 44100
+SAMPLE_RATE  = 48000
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 devices = []
+music_processes = {}
 
 server = Server("tuya_mcp_server")
 
@@ -35,7 +44,6 @@ def load_devices():
         return {"status": "error", "message": f"Error: Invalid JSON format in {DEVICES_FILE}."}
 
 def parse_audio(audio_data, freq_range):
-    sample_rate = 44100
     n = len(audio_data)
     if n == 0:
         return (0, 0, 0)
@@ -99,7 +107,7 @@ def parse_color(color_input):
         return color_names[color_input.lower()]
     return None
 
-def control_device(device, action, *args, function_name='', **kwargs):
+async def control_device(device, action, *args, function_name='', **kwargs):
     try:
         device_id = device['id']
         local_key = device['key']
@@ -111,11 +119,10 @@ def control_device(device, action, *args, function_name='', **kwargs):
         d.set_socketPersistent(True)
 
         function = getattr(d, function_name or action)
-        function(*args, **kwargs)
+        await asyncio.to_thread(function, *args, **kwargs)
 
     except Exception as e:
         print(f"Error controlling device {device.get('name', 'unknown')}: {e}")
-
 
 @server.list_resources()
 async def handle_list_resources() -> list[types.Resource]:
@@ -221,7 +228,7 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="set_mode",
-            description="Set the mode of a Tuya device",
+            description="Set the mode of a Tuya device. For 'music' mode you should try the tool called music.",
              inputSchema={
                 "type": "object",
                 "properties": {
@@ -244,8 +251,19 @@ async def handle_list_tools() -> list[types.Tool]:
                  },
             },
         ),
+         types.Tool(
+            name="stop_music",
+            description="Stop music mode for a Tuya device",
+             inputSchema={
+                "type": "object",
+                "properties": {
+                    "device": {"type": "string"},
+                    "all": {"type": "boolean"}
+                 },
+                 "required": ["device"]
+            },
+        ),
     ]
-
 
 @server.call_tool()
 async def handle_call_tool(
@@ -271,32 +289,29 @@ async def handle_call_tool(
          return await handle_set_mode(arguments)
     if name == "music":
          return await handle_music(arguments)
+    if name == "stop_music":
+        return await handle_stop_music(arguments)
 
     raise ValueError(f"Unknown tool: {name}")
-
 
 async def handle_action_over_devices(action, arguments):
     all_devices = arguments.get('all', False)
     device_name = arguments.get('device')
 
     if not all_devices and not device_name:
-        raise ValueError("device name must be provided")
+        raise ValueError("Device name must be provided")
 
-    threads = []
-    for device in devices:
-        if device.get('name') == device_name or all_devices:
-            thread = threading.Thread(target=control_device, args=(device, action), daemon=True)
-            thread.start()
-            threads.append(thread)
-            if not all_devices:
-                return [types.TextContent(type="text", text=f"Device {device_name} {action}.")]
+    tasks = [
+        control_device(device, action)
+        for device in devices
+        if device.get('name') == device_name or all_devices
+    ]
 
-
-    for thread in threads:
-        thread.join()
-
-    if all_devices:
-         return [types.TextContent(type="text", text=f"All devices {action}.")]
+    if tasks:
+        await asyncio.gather(*tasks)
+        if all_devices:
+            return [types.TextContent(type="text", text=f"All devices {action}.")]
+        return [types.TextContent(type="text", text=f"Device {device_name} {action}.")]
 
     raise ValueError(f"Device {device_name} not found")
 
@@ -307,104 +322,201 @@ async def handle_set_color(arguments):
 
     if not color_input:
         raise ValueError("Color must be provided")
+    
     rgb = parse_color(color_input)
-    if rgb and all(x is not None for x in rgb):
-        threads = []
-        for device in devices:
-            if device.get('name') == device_name or all_devices:
-                thread = threading.Thread(target=control_device, args=(device, "set_colour", *rgb), daemon=True)
-                thread.start()
-                threads.append(thread)
-                if not all_devices:
-                    return [types.TextContent(type="text", text=f"Device {device_name} color set to {color_input}.")]
-        for thread in threads:
-            thread.join()
-        if all_devices:
-             return [types.TextContent(type="text", text=f"All devices color set to {color_input}.")]
-        raise ValueError(f"Device {device_name} not found")
+    if not rgb or any(x is None for x in rgb):
+        raise ValueError("Invalid color format")
 
-    raise ValueError("Invalid color format")
+    tasks = [
+        control_device(device, "set_colour", *rgb)
+        for device in devices
+        if device.get('name') == device_name or all_devices
+    ]
+
+    if tasks:
+        await asyncio.gather(*tasks)
+        if all_devices:
+            return [types.TextContent(type="text", text=f"All devices color set to {color_input}.")]
+        return [types.TextContent(type="text", text=f"Device {device_name} color set to {color_input}.")]
+
+    raise ValueError(f"Device {device_name} not found")
 
 async def handle_set_brightness(arguments):
-    all_devices = arguments.get('all',False)
+    all_devices = arguments.get('all', False)
     device_name = arguments.get('device')
     brightness = arguments.get('brightness')
 
-    if not all_devices and not device_name or brightness is None:
-         raise ValueError("device and brightness must be provided")
+    if (not all_devices and not device_name) or brightness is None:
+        raise ValueError("Device and brightness must be provided")
+    
     try:
         brightness = int(brightness)
     except ValueError:
-        raise ValueError("brightness must be an integer")
+        raise ValueError("Brightness must be an integer")
+    
     if not (0 <= brightness <= 1000):
-       raise ValueError("brightness must be between 0 and 1000")
-    threads = []
-    for device in devices:
-         if device.get('name') == device_name or all_devices:
-            thread = threading.Thread(target=control_device, args=(device, "set_brightness", brightness), daemon=True)
-            thread.start()
-            threads.append(thread)
-            if not all_devices:
-                return [types.TextContent(type="text", text=f"Device {device_name} brightness set to {brightness}.")]
+        raise ValueError("Brightness must be between 0 and 1000")
 
-    for thread in threads:
-        thread.join()
-    if all_devices:
-        return [types.TextContent(type="text", text=f"All devices brightness set to {brightness}.")]
+    tasks = [
+        control_device(device, "set_brightness", brightness)
+        for device in devices
+        if device.get('name') == device_name or all_devices
+    ]
+
+    if tasks:
+        await asyncio.gather(*tasks)
+        if all_devices:
+            return [types.TextContent(type="text", text=f"All devices brightness set to {brightness}.")]
+        return [types.TextContent(type="text", text=f"Device {device_name} brightness set to {brightness}.")]
 
     raise ValueError(f"Device {device_name} not found")
 
 async def handle_set_colourtemp(arguments):
-    all_devices = arguments.get('all',False)
+    all_devices = arguments.get('all', False)
     device_name = arguments.get('device')
     colourtemp = arguments.get('colourtemp')
 
-    if not all_devices and not device_name or colourtemp is None:
-        raise ValueError("device and colour temperature must be provided")
+    if (not all_devices and not device_name) or colourtemp is None:
+        raise ValueError("Device and colour temperature must be provided")
+
     try:
         colourtemp = int(colourtemp)
     except ValueError:
-         raise ValueError("colour temperature must be an integer")
-    if not (0 <= colourtemp <= 1000):
-         raise ValueError("colour temperature must be between 0 and 1000")
-    threads = []
-    for device in devices:
-        if device.get('name') == device_name or all_devices:
-           thread = threading.Thread(target=control_device, args=(device, "set_colourtemp", colourtemp), daemon=True)
-           thread.start()
-           threads.append(thread)
-           if not all_devices:
-              return [types.TextContent(type="text", text=f"Device {device_name} colour temperature set to {colourtemp}.")]
-    for thread in threads:
-        thread.join()
-    if all_devices:
-         return [types.TextContent(type="text", text=f"All devices colour temperature set to {colourtemp}.")]
-    raise ValueError(f"Device {device_name} not found")
+        raise ValueError("Colour temperature must be an integer")
 
+    if not (0 <= colourtemp <= 1000):
+        raise ValueError("Colour temperature must be between 0 and 1000")
+
+    tasks = [
+        control_device(device, "set_colourtemp", colourtemp)
+        for device in devices
+        if device.get('name') == device_name or all_devices
+    ]
+
+    if tasks:
+        await asyncio.gather(*tasks)
+        if all_devices:
+            return [types.TextContent(type="text", text=f"All devices colour temperature set to {colourtemp}.")]
+        return [types.TextContent(type="text", text=f"Device {device_name} colour temperature set to {colourtemp}.")]
+
+    raise ValueError(f"Device {device_name} not found")
 
 async def handle_set_mode(arguments):
-    all_devices = arguments.get('all',False)
+    all_devices = arguments.get('all', False)
     device_name = arguments.get('device')
     mode = arguments.get('mode')
-    if not all_devices and not device_name or not mode:
-       raise ValueError("device and mode must be provided")
-    if mode not in ["white", "colour", "scene", "music"]:
-        raise ValueError("mode must be white, colour, scene, or music")
-    threads = []
-    for device in devices:
-         if device.get('name') == device_name or all_devices:
-            thread = threading.Thread(target=control_device, args=(device, "set_mode", mode), daemon=True)
-            thread.start()
-            threads.append(thread)
-            if not all_devices:
-                 return [types.TextContent(type="text", text=f"Device {device_name} mode set to {mode}.")]
 
-    for thread in threads:
-        thread.join()
-    if all_devices:
-         return [types.TextContent(type="text", text=f"All devices mode set to {mode}.")]
+    if (not all_devices and not device_name) or not mode:
+        raise ValueError("Device and mode must be provided")
+
+    if mode not in ["white", "colour", "scene", "music"]:
+        raise ValueError("Mode must be white, colour, scene, or music")
+
+    tasks = [
+        control_device(device, "set_mode", mode)
+        for device in devices
+        if device.get('name') == device_name or all_devices
+    ]
+
+    if tasks:
+        await asyncio.gather(*tasks)
+        if all_devices:
+            return [types.TextContent(type="text", text=f"All devices mode set to {mode}.")]
+        return [types.TextContent(type="text", text=f"Device {device_name} mode set to {mode}.")]
+
     raise ValueError(f"Device {device_name} not found")
 
+async def handle_stop_music(arguments):
+    device_name = arguments.get('device')
+    all_devices = arguments.get('all', False)
+
+    if not all_devices and not device_name:
+        raise ValueError("Device or all must be provided")
+
+    tasks = [
+        stop_music(device.get('name'))
+        for device in devices
+        if device.get('name') == device_name or all_devices
+    ]
+
+    if tasks:
+        await asyncio.gather(*tasks)
+        if all_devices:
+            return [types.TextContent(type="text", text=f"All devices stopped.")]
+        return [types.TextContent(type="text", text=f"Device {device_name} stopped.")]
+
+    raise ValueError(f"Device {device_name} not found")
+
+async def stop_music(device_name):
+    if device_name in music_processes:
+        task = music_processes.pop(device_name)
+        task.cancel()
+        try:
+            await task  # Ensure the task finishes
+        except asyncio.CancelledError:
+            pass  # Expected behavior
+        return f"Music mode stopped for device {device_name}"
+    
+    return f"Music mode is not active for device {device_name}"
+
+async def music_process(device, delay, freq_range):
+    """Asynchronous task to process music mode for a device."""
+    device_id = device['id']
+    local_key = device['key']
+    ip_address = device['ip']
+    version = device["ver"]
+
+    d = tinytuya.BulbDevice(device_id, ip_address, local_key)
+    d.set_version(version)
+    d.set_socketPersistent(True)
+
+    process = await asyncio.create_subprocess_exec(
+        'pw-record',
+        f'--target={SINKORSOURCE}',
+        f'--rate={SAMPLE_RATE}',
+        '-',
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    logging.info(f"Process parec listening to {SINKORSOURCE}.")
+
+    try:
+        while True:
+            error = await process.stderr.readline()
+            if error:
+                raise ValueError(f"Error from process: {error.decode('utf-8')}")
+
+            data = await process.stdout.read(SAMPLE_RATE)
+            if not data:
+                logging.info(f"No audio data.")
+                await asyncio.sleep(delay)
+                continue
+            audio_data = np.frombuffer(data, dtype=np.int16).astype(float)
+            hue, saturation, value = parse_audio(audio_data, freq_range)
+            logging.info(f"Audio data processed: Hue: {hue}, Saturation: {saturation}, Value: {value}")
+            d.set_hsv(hue / 360.0, saturation / 1000.0, value / 1000.0, nowait=True)
+            await asyncio.sleep(delay)
+
+    except asyncio.CancelledError:
+        logging.info(f"Music process for {device['name']} cancelled.")
+
+        # Safely terminate process on cancellation
+        if process.returncode is None:
+            process.terminate()  # Try to terminate gracefully first
+            try:
+                await process.wait()  # Ensure the process exits
+            except ProcessLookupError:
+                pass  # Ignore if the process already exited
+        raise  # Reraise the cancellation error
+
+    finally:
+        if process.returncode is None:
+            process.kill()
+            try:
+                await process.wait()  # Ensure complete cleanup
+            except ProcessLookupError:
+                pass  # Ignore if already exited
 
 async def handle_music(arguments):
     all_devices = arguments.get('all', False)
@@ -412,71 +524,34 @@ async def handle_music(arguments):
     delay = arguments.get('delay', 0.1)
 
     if not all_devices and not device_name:
-         raise ValueError("device must be provided")
+        raise ValueError("device name must be provided")
+
     try:
         delay = float(delay)
     except ValueError:
         raise ValueError("delay must be a float")
 
-    # Set the frequency range limits
-    min_freq = 100   # Start of the frequency range
-    max_freq = 2000  # End of the frequency range
+    min_freq, max_freq = 100, 2000
     num_devices = len(devices)
-
     if num_devices == 0:
         raise ValueError("No devices configured")
 
-    # Divide the frequency range into equal bands for each device
     step = (max_freq - min_freq) // num_devices
     frequency_ranges = [(min_freq + i * step, min_freq + (i + 1) * step) for i in range(num_devices)]
     started_devices = []
 
     for i, device in enumerate(devices):
         if device.get('name') == device_name or all_devices:
-            device_id = device['id']
-            local_key = device['key']
-            ip_address = device['ip']
-            version = device["ver"]
+            freq_range = frequency_ranges[i]
+            task = asyncio.create_task(music_process(device, delay, freq_range))
+            music_processes[device['name']] = task
+            started_devices.append(f"{device['name']} ({freq_range[0]}-{freq_range[1]} Hz)")
 
-            # Assign a specific frequency range dynamically
-            freq_range = frequency_ranges[i]  
-
-            try:
-                d = tinytuya.BulbDevice(device_id, ip_address, local_key)
-                d.set_version(version)
-                d.set_socketPersistent(True)
-
-                # Create a separate audio stream for each device
-                process = subprocess.Popen(
-                    ['parec', '-d', 'alsa_output.pci-0000_00_1b.0.analog-stereo.monitor', '--format=s16le', '--rate=44100'], 
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
-
-                def audio_process_thread(d, process, delay, freq_range):
-                    try:
-                        while True:
-                            stdout = process.stdout.read(44100)
-                            if not stdout:
-                                d.set_hsv(0, 0, 0, nowait=True)
-                                continue
-                            audio_data = np.frombuffer(stdout, dtype=np.int16).astype(float)
-                            hue, saturation, value = parse_audio(audio_data, freq_range)
-                            d.set_hsv(hue / 360.0, saturation / 1000.0, value / 1000.0, nowait=True)
-                            time.sleep(delay)
-                    except Exception as e:
-                        print(f"Error in audio processing thread: {e}")
-
-                # Start a new thread for each device with its specific frequency range
-                audio_thread = threading.Thread(target=audio_process_thread, args=(d, process, delay, freq_range), daemon=True)
-                audio_thread.start()
-
-                started_devices.append(f"{device['name']} ({freq_range[0]}-{freq_range[1]} Hz)")
-            except Exception as e:
-                raise ValueError(f"Error setting color for device {device_name}: {e}")
     if started_devices:
         return [types.TextContent(type="text", text=f"Music mode started for {', '.join(started_devices)}")]
 
     raise ValueError("No matching devices found")
+
 
 async def main():
     # Load devices from snapshot.json
@@ -499,4 +574,4 @@ async def main():
         ))
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(main())
