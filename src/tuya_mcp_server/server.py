@@ -14,11 +14,14 @@ import mcp.server.stdio
 import tinytuya
 import sys
 import os
+import mcp.server.stdio
+import queue
+import threading
 
-DEVICES_FILE = os.environ.get('TUYA_MCP_DEVICES_FILE', 'snapshot.json')
-SINKORSOURCE = os.environ.get('TUYA_MCP_PULSEAUDIO_SINK', 'alsa_output.pci-0000_00_1b.0.analog-stereo.monitor')
-SAMPLE_RATE  = 44100
-SAMPLE_RATE  = 48000
+DEVICES_FILE = os.environ.get('TUYA_MCP_DEVICES_FILE', os.path.expanduser('~/snapshot.json'))
+SINKORSOURCE = os.environ.get('TUYA_MCP_AUDIO_MONITOR', 'alsa_output.pci-0000_00_1b.0.analog-stereo.monitor')
+SAMPLE_RATE  = os.environ.get('TUYA_MCP_AUDIO_SAMPLE_RATE', 48000)
+XDG_RUNTIME_DIR = os.environ.get('XDG_RUNTIME_DIR',f'/run/user/{os.geteuid()}')
 
 # Configure logging
 logging.basicConfig(
@@ -27,6 +30,7 @@ logging.basicConfig(
 
 devices = []
 music_processes = {}
+audio_buffer = queue.Queue()
 
 server = Server("tuya_mcp_server")
 
@@ -43,7 +47,7 @@ def load_devices():
         print(f"Error: Invalid JSON format in {DEVICES_FILE}.")
         return {"status": "error", "message": f"Error: Invalid JSON format in {DEVICES_FILE}."}
 
-def parse_audio(audio_data, freq_range):
+def parse_audio(audio_data, sample_rate, freq_range):
     n = len(audio_data)
     if n == 0:
         return (0, 0, 0)
@@ -470,53 +474,41 @@ async def music_process(device, delay, freq_range):
     d.set_version(version)
     d.set_socketPersistent(True)
 
-    process = await asyncio.create_subprocess_exec(
-        'pw-record',
-        f'--target={SINKORSOURCE}',
-        f'--rate={SAMPLE_RATE}',
-        '-',
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-
-    logging.info(f"Process parec listening to {SINKORSOURCE}.")
-
     try:
         while True:
-            error = await process.stderr.readline()
-            if error:
-                raise ValueError(f"Error from process: {error.decode('utf-8')}")
-
-            data = await process.stdout.read(SAMPLE_RATE)
-            if not data:
-                logging.info(f"No audio data.")
-                await asyncio.sleep(delay)
-                continue
-            audio_data = np.frombuffer(data, dtype=np.int16).astype(float)
-            hue, saturation, value = parse_audio(audio_data, freq_range)
+            audio_data = audio_buffer.get()
+            hue, saturation, value = parse_audio(audio_data, SAMPLE_RATE, freq_range)
             logging.info(f"Audio data processed: Hue: {hue}, Saturation: {saturation}, Value: {value}")
             d.set_hsv(hue / 360.0, saturation / 1000.0, value / 1000.0, nowait=True)
             await asyncio.sleep(delay)
 
     except asyncio.CancelledError:
         logging.info(f"Music process for {device['name']} cancelled.")
+    except Exception as e:
+        logging.error(f"Error in music_process: {e}")
 
-        # Safely terminate process on cancellation
-        if process.returncode is None:
-            process.terminate()  # Try to terminate gracefully first
-            try:
-                await process.wait()  # Ensure the process exits
-            except ProcessLookupError:
-                pass  # Ignore if the process already exited
-        raise  # Reraise the cancellation error
 
-    finally:
-        if process.returncode is None:
-            process.kill()
-            try:
-                await process.wait()  # Ensure complete cleanup
-            except ProcessLookupError:
-                pass  # Ignore if already exited
+def read_audio_thread():
+    process = subprocess.Popen(
+        [
+            'pw-record',
+            f'--target={SINKORSOURCE}',
+            f'--rate={SAMPLE_RATE}',
+            '-',
+        ],
+        env={'XDG_RUNTIME_DIR': XDG_RUNTIME_DIR},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+
+    logging.info(f"Process parec listening to {SINKORSOURCE}. env XDG_RUNTIME_DIR={XDG_RUNTIME_DIR}")
+
+    while True:
+        data = process.stdout.read(SAMPLE_RATE)
+        audio_data = np.frombuffer(data, dtype=np.int16).astype(float)
+        audio_buffer.put(audio_data)
+
+
 
 async def handle_music(arguments):
     all_devices = arguments.get('all', False)
@@ -557,6 +549,10 @@ async def main():
     # Load devices from snapshot.json
     if load_devices().get("status") != "success":
         return
+
+    # Start the audio reading thread
+    audio_thread = threading.Thread(target=read_audio_thread, daemon=True)
+    audio_thread.start()
 
     # Run the server using stdin/stdout streams
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
