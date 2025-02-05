@@ -2,6 +2,16 @@
 
 A MCP server for Tuya devices
 
+Please note this is just a experimental and unstable project.
+So far the daemon and client program controls rgb light bulbs using [tinytuya](https://github.com/jasonacox/tinytuya) library,
+which involves some setup follow the tutorial [here](https://github.com/jasonacox/tinytuya#setup-wizard---getting-local-keys).
+Once you generated your `snapshot.json` place it in your home directory.
+There are ways of configure the snapshot.json location using environment variables (look the head of tuyad script)
+
+The MCP server may or may not work.
+
+<details>
+<summary>Generic default instructions</summary>
 ## Components
 
 ### Resources
@@ -109,3 +119,5 @@ npx @modelcontextprotocol/inspector uv --directory <path-to-your-development-fil
 
 
 Upon launching, the Inspector will display a URL that you can access in your browser to begin debugging.
+
+</details>

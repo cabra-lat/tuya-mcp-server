@@ -69,9 +69,6 @@ def main():
     music_parser.add_argument('--delay', type=float, default=0.1, help='Delay value')
     music_parser.add_argument('--all', action='store_true', help='Music mode using all devices')
 
-    # Restart tuyad command
-    restart_parser = subparsers.add_parser('restart_tuyad', help='Restart the tuyad daemon')
-
     args = parser.parse_args()
 
     parameters = {}
@@ -138,7 +135,8 @@ def main():
             parameters["device"] = args.device
         if hasattr(args, 'delay'):
             parameters["delay"] = args.delay
-
+    elif command:
+        print("Error: Invalid command")
 
     if command:
         result = send_command(command, parameters if parameters else None)
@@ -149,7 +147,7 @@ def main():
         print(json.dumps(result))
         return
 
-    print("Error: Invalid command")
+    parser.print_help()
 
 if __name__ == '__main__':
     main()
