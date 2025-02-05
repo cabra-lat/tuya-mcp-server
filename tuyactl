@@ -52,8 +52,8 @@ def main():
     brightness_parser.add_argument('--all', action='store_true', help='Set brightness for all devices')
 
     # Set colour temperature command
-    colourtemp_parser = subparsers.add_parser('colourtemp', help='Set the colour temperature of a device')
-    colourtemp_parser.add_argument('colourtemp', type=int,  help='Colour temperature value')
+    colourtemp_parser = subparsers.add_parser('temperature', help='Set the colour temperature of a device')
+    colourtemp_parser.add_argument('temperature', type=int,  help='Colour temperature value')
     colourtemp_parser.add_argument('--device', type=str, help='Device name')
     colourtemp_parser.add_argument('--all', action='store_true', help='Set colour temperature for all devices')
 
@@ -66,15 +66,15 @@ def main():
     # Music sim command
     music_parser = subparsers.add_parser('music', help='Simulate music mode for a device')
     music_parser.add_argument('--device', type=str, help='Device name')
-    music_parser.add_argument('--delay', type=float, default=0.1, help='Delay value')
     music_parser.add_argument('--all', action='store_true', help='Music mode using all devices')
+    music_parser.add_argument('--stop', action='store_true', help='Stop music mode for selected devices')
 
     args = parser.parse_args()
 
     parameters = {}
-    command = args.command
+    endpoint = args.command
     if args.command == 'on':
-        command = 'turn_on'
+        endpoint = 'turn_on'
         if args.all:
             parameters["all"] = True
         elif args.device:
@@ -83,18 +83,17 @@ def main():
             print("Error: Device name required when not using --all")
             sys.exit(1)
     elif args.command == 'off':
+        endpoint = 'turn_off'
         if args.all:
-            command = 'turn_off'
             parameters["all"] = True
         elif args.device:
-            command = 'turn_off'
             parameters["device"] = args.device
         else:
-          print("Error: Device name required when not using --all")
-          sys.exit(1)
+            print("Error: Device name required when not using --all")
+            sys.exit(1)
 
     elif args.command == 'color':
-        command = 'set_color'
+        endpoint = 'set_color'
         if args.all:
             parameters["all"] = True
         elif hasattr(args, 'device'):
@@ -103,24 +102,24 @@ def main():
             parameters["color"] = args.color
 
     elif args.command == 'brightness':
-        command = 'set_brightness'
+        endpoint = 'set_brightness'
         if args.all:
             parameters["all"] = True
         elif hasattr(args, 'device'):
             parameters["device"] = args.device
         if hasattr(args, 'brightness'):
             parameters["brightness"] = args.brightness
-    elif args.command == 'colourtemp':
-        command = 'set_colourtemp'
+    elif args.command == 'temperature':
+        endpoint = 'set_temperature'
         if args.all:
             parameters["all"] = True
         elif hasattr(args, 'device'):
             parameters["device"] = args.device
-        if hasattr(args, 'colourtemp'):
-            parameters["colourtemp"] = args.colourtemp
+        if hasattr(args, 'temperature'):
+            parameters["temperature"] = args.temperature
 
     elif args.command == 'mode':
-        command = 'set_mode'
+        endpoint = 'set_mode'
         if args.all:
             parameters["all"] = True
         elif hasattr(args, 'device'):
@@ -133,14 +132,14 @@ def main():
             parameters["all"] = True
         elif hasattr(args, 'device'):
             parameters["device"] = args.device
-        if hasattr(args, 'delay'):
-            parameters["delay"] = args.delay
-    elif command:
+        if hasattr(args, 'stop'):
+            parameters["stop"] = args.stop 
+    elif endpoint:
         print("Error: Invalid command")
 
-    if command:
-        result = send_command(command, parameters if parameters else None)
-        if command == 'list':
+    if endpoint:
+        result = send_command(endpoint, parameters if parameters else None)
+        if endpoint == 'list':
             for device in result:
                 print(device)
             return

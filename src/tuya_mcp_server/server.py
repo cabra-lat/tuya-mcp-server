@@ -114,6 +114,16 @@ def control_device(device, action, *args, function_name='', **kwargs):
         d.set_version(version)
         d.set_socketPersistent(True)
 
+        # Check device connectivity
+        try:
+            data = d.status()
+            if data is None or data.get('dps') is None:
+                print(f"Device {device.get('name', 'unknown')} is unreachable.")
+                return  # Skip controlling the device if it's unreachable
+        except Exception as e:
+            print(f"Error checking device status for {device.get('name', 'unknown')}: {e}")
+            return
+
         function = getattr(d, function_name or action)
         function(*args, **kwargs)
 
@@ -286,18 +296,11 @@ async def handle_action_over_devices(action, arguments):
     if not all_devices and not device_name:
         raise ValueError("device name must be provided")
 
-    threads = []
     for device in devices:
         if device.get('name') == device_name or all_devices:
-            thread = threading.Thread(target=control_device, args=(device, action), daemon=True)
-            thread.start()
-            threads.append(thread)
+            control_device(device, action)
             if not all_devices:
                 return [types.TextContent(type="text", text=f"Device {device_name} {action}.")]
-
-
-    for thread in threads:
-        thread.join()
 
     if all_devices:
          return [types.TextContent(type="text", text=f"All devices {action}.")]
@@ -459,13 +462,22 @@ async def handle_music(arguments):
 
                 def audio_process_thread(d, process, delay, freq_range):
                     try:
-                        while True:
+                        while process.poll() is None:
                             stdout = process.stdout.read(44100)
+                            if not stdout:
+                                break  # Exit if no data is read (process terminated)
                             audio_data = np.frombuffer(stdout, dtype=np.int16).astype(float)
                             hue, saturation, value = parse_audio(audio_data, freq_range)
                             d.set_hsv(hue / 360.0, saturation / 1000.0, value / 1000.0, nowait=True)
                     except Exception as e:
                         print(f"Error in audio processing thread: {e}")
+                    finally:
+                        process.terminate()  # Ensure process is terminated
+                        process.wait()  # Wait for the process to finish
+                        if process.stdout:
+                            process.stdout.close()
+                        if process.stderr:
+                            process.stderr.close()
 
                 # Start a new thread for each device with its specific frequency range
                 audio_thread = threading.Thread(target=audio_process_thread, args=(d, process, delay, freq_range), daemon=True)
