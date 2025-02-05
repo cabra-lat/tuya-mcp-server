@@ -1,9 +1,4 @@
-from . import server
-import asyncio
+# tuya_mcp_server/__init__.py
+from .server import main
 
-def main():
-    """Main entry point for the package."""
-    asyncio.run(server.main())
-
-# Optionally expose other important items at package level
-__all__ = ['main', 'server']
+__all__ = ['main']
