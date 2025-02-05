@@ -8,8 +8,11 @@ import asyncio
 import aiofiles
 import numpy as np
 from scipy.fft import fft
+from scipy.signal import butter, filtfilt
 from quart import Quart, request, jsonify
 from colour import Color
+import time
+import random
 
 import logging
 
@@ -18,11 +21,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 DEVICES_FILE = os.environ.get('DEVICES', os.path.expanduser('~/snapshot.json'))
 XDG_RUNTIME_DIR = os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
 AUDIO_TARGET = os.environ.get('TUYA_MCP_AUDIO_TARGET', 'alsa_output.pci-0000_00_1b.0.analog-stereo.monitor')
-SAMPLE_RATE = 44100
+CHANNELS    = 2
+SAMPLE_RATE = 48000
+BUFFER_SIZE = SAMPLE_RATE * CHANNELS # 16 bits LE gives 500ms of data
+CHUNK_SIZE  = BUFFER_SIZE // 10
 
-devices = []
-audio_tasks = []
 app = Quart(__name__)
+devices = []
+audio_queue = asyncio.Queue()
+stop_event = asyncio.Event()
 
 async def load_devices():
     global devices
@@ -80,30 +87,162 @@ async def handle_action_over_devices(action, request_data, *args, **kwargs):
 
     return jsonify({"status": "error", "message": f"Device {device_name} not found"}), 404
 
-def parse_audio(audio_data, sample_rate, freq_range):
-    n = len(audio_data)
-    if n == 0:
-        return (0, 0, 0)
 
-    fft_data = np.fft.fft(audio_data)
+def get_hue_for_frequency(fft_data, sample_rate, freq_range):
+    n = len(fft_data)
     fft_abs = np.abs(fft_data[:n // 2])
     frequencies = np.fft.fftfreq(n, 1 / sample_rate)[:n // 2]
-
     freq_mask = np.logical_and(frequencies >= freq_range[0], frequencies <= freq_range[1])
     freq_range_values = fft_abs[freq_mask]
-
-    if not freq_range_values.size:
-        return (0, 0, 0)
-
+    if len(freq_range_values) == 0: return (0, 1000)
     dominant_frequency_index = np.argmax(freq_range_values)
     dominant_frequency = frequencies[freq_mask][dominant_frequency_index]
     amplitude = freq_range_values[dominant_frequency_index]
 
-    h = int((dominant_frequency / freq_range[1]) * 360)
-    s = 1000 #int(min(amplitude / 10000, 1.0) * 1000)
-    v = 1000 #int(min(amplitude / 5000, 1.0) * 1000)
+    # Determine parameters for Tuya DP27 payload
+    hue = int((dominant_frequency / freq_range[1]) * 360)
+    return hue, 1000 
 
-    return h, s, v
+def generate_dp27_payload(mode: int,
+                          hue: int,
+                          saturation: int,
+                          value: int,
+                          brightness: int = 1000, 
+                          white_brightness: int = 0, 
+                          temperature: int = 1000) -> str:
+    """
+    Generate a DP27 payload for Tuya music mode.
+
+    :param mode: 0 for jumping mode, 1 for gradient mode.
+    :param hue: Hue value (0-360).
+    :param saturation: Saturation (0-1000).
+    :param value: Value (0-1000).
+    :param brightness: Brightness (0-1000), default is 1000.
+    :param white_brightness: White brightness (0-1000), default is 1000.
+    :param temperature: Color temperature (0-1000), default is 1000.
+    :return: DP27 string payload.
+    """
+    return f"{mode:01X}{hue:04X}{saturation:04X}{brightness:04X}{white_brightness:04X}{temperature:04X}"
+
+async def audio_reader():
+    process = await asyncio.create_subprocess_exec(
+        'parec', '-d', AUDIO_TARGET, '--format=s16le', f'--rate={SAMPLE_RATE}',
+        env={'XDG_RUNTIME_DIR': XDG_RUNTIME_DIR},
+        stdout=asyncio.subprocess.PIPE
+    )
+    while not stop_event.is_set():
+        audio_data = await process.stdout.read(CHUNK_SIZE)
+        if audio_data:
+            await audio_queue.put(audio_data)
+
+
+async def audio_processor(device, freq_range, *args, timeout=0.5, retries=1, **kwargs):
+    global stop_event, audio_queue
+    try:
+        device_id   = device['id']
+        device_name = device['name']
+        local_key   = device['key']
+        ip_address  = device['ip']
+        version     = float(device['ver'])
+
+        d = tinytuya.BulbDevice(
+            device_id,
+            ip_address,
+            local_key,
+            connection_retry_limit=retries,
+            connection_timeout=timeout)
+        d.set_version(version)
+        d.set_socketPersistent(True)
+        d.set_mode('music')
+
+        data = d.status()
+        logging.info(f'Current Status of Bulb: {data}')
+
+        # Parameters for beat detection and processing
+        BEAT_THRESHOLD = 0.3         # Adjust this factor based on experiments
+        RUNNING_AVG_COEFF = 0.975     # For smoothing the volume
+        MIN_BRIGHTNESS = 0
+        MAX_BRIGHTNESS = 1000
+
+        # Choose the FFT window length (number of samples). For 500ms at 48kHz:
+        window_length = int(0.5 * SAMPLE_RATE)  # e.g. 24000 samples for mono
+        full_audio = np.empty(0, dtype=np.float32)  # using float32 since we already cast to float
+        running_avg = 0
+        max_running_avg = 0
+        current_hue = 0
+        current_volume = 0
+        saturation = 1000
+        brightness = 1000
+
+        # Helper functions (as before)
+        def running_average(current_avg, new_value, coeff=RUNNING_AVG_COEFF):
+            return coeff * current_avg + (1 - coeff) * new_value
+
+        def detect_beat(current_volume, running_avg, threshold=BEAT_THRESHOLD):
+            # A beat is detected if the current volume exceeds the running average by the threshold factor.
+            return current_volume > running_avg * threshold
+
+        def get_volume(mono_audio):
+            # Compute RMS volume for the given window
+            return np.sqrt(np.mean(mono_audio ** 2))
+
+        async def change_hue(audio):
+            ## Perform FFT on the window_data
+            #fft_data = np.fft.fft(audio)
+            ## Use the actual sample rate for frequency computation
+            #hue, brightness = get_hue_for_frequency(fft_data, CHUNK_SIZE, freq_range)
+            ## Generate and send the payload
+            hue = random.randint(0,360) 
+            brightness = random.randint(0,1000)
+            value = generate_dp27_payload(0, hue, saturation, brightness)
+            payload = d.generate_payload(tinytuya.CONTROL, {"27": value})
+            logging.info(f" > Sending hue: {hue} sat: {saturation} brightness: {brightness} ({value}) to {device_name}")
+            d.send(payload)
+
+        while not stop_event.is_set():
+            audio_buffer = await audio_queue.get()
+            # Convert buffer to numpy array (16-bit samples)
+            audio_array = np.frombuffer(audio_buffer, dtype=np.int16)#.astype(np.float32)
+            # Reshape to stereo and mix down to mono if needed
+            if CHANNELS > 2:
+                audio_array = audio_array.reshape(-1, CHANNELS)
+                mono_audio = np.mean(audio_array, axis=1)
+            else:
+                mono_audio = audio_array
+            await change_hue(mono_audio)
+
+    except Exception as e:
+        logging.error(f"Error controlling {device_name or 'unknown device'}: {e}")
+        d.set_white()
+        raise
+
+async def music_mode(request_data):
+    global stop_event, audio_queue
+
+    stop = request_data.get('stop', False)
+    all_devices = request_data.get('all', False)
+    device_name = request_data.get('device')
+    
+    if stop:
+        stop_event.set()
+        return jsonify({"status": "success", "message": "Music mode stopped"})
+    
+    stop_event.clear()
+    selected_devices = [d for d in devices if all_devices or d.get('name') == device_name]
+    if not selected_devices:
+        return jsonify({"status": "error", "message": "No matching devices found"}), 404
+    
+    minf = 10
+    maxf = 20000
+    step = (maxf - minf) // len(selected_devices)
+    frequency_ranges = [(minf + i * step, minf + (i + 1) * step) for i in range(len(selected_devices))]
+    
+    asyncio.create_task(audio_reader())
+    for device, freq_range in zip(selected_devices, frequency_ranges):
+        asyncio.create_task(audio_processor(device, freq_range))
+        logging.info(f"{device.get('name')} will handle {freq_range[0]} Hz - {freq_range[1]} Hz")
+    
+    return jsonify({"status": "success", "message": "Music mode started"})
 
 @app.route('/list', methods=['GET'])
 async def device_list():
@@ -147,69 +286,8 @@ async def set_color():
 
 @app.route('/music', methods=['POST'])
 async def music():
-    global audio_tasks  # Ensure global scope
-
     request_data = await request.get_json()
-    all_devices = request_data.get('all', False)
-    stop_signal = request_data.get('stop', False)
-    device_name = request_data.get('device')
-    min_freq, max_freq = request_data.get('frequency_range', (10, 20000)) or (10, 20000)
-
-    if not all_devices and not device_name:
-        return jsonify({"status": "error", "message": "device must be provided"}), 400
-
-    selected_devices = [d for d in devices if all_devices or d.get('name') == device_name]
-
-    if not selected_devices:
-        return jsonify({"status": "error", "message": "No matching devices found"}), 404
-
-    # Stop existing tasks for selected devices before starting new ones
-    tasks_to_stop = [task for task in audio_tasks if task.get_name() in {d['name'] for d in selected_devices}]
-    for task in tasks_to_stop:
-        task.cancel()
-    await asyncio.gather(*tasks_to_stop, return_exceptions=True)
-
-    # Clean up stopped tasks
-    audio_tasks = [task for task in audio_tasks if not task.cancelled()]
-
-    # If stop signal is sent, return after stopping
-    if stop_signal:
-        return jsonify({"status": "success", "message": "Stopped selected devices"}), 200
-
-    # Start new music mode tasks
-    step = (max_freq - min_freq) // len(selected_devices)
-    frequency_ranges = [(min_freq + i * step, min_freq + (i + 1) * step) for i in range(len(selected_devices))]
-
-    async def audio_task(device, freq_range):
-        try:
-            logging.info(f"Starting audio listener for {device['name']}.")
-            process = await asyncio.create_subprocess_exec(
-                'parec', '-d', AUDIO_TARGET, '--format=s16le', f'--rate={SAMPLE_RATE}',
-                env={'XDG_RUNTIME_DIR': XDG_RUNTIME_DIR},
-                stdout=asyncio.subprocess.PIPE
-            )
-
-            while True:
-                stdout = await process.stdout.read(SAMPLE_RATE)
-                if not stdout:
-                    continue
-                audio_data = np.frombuffer(stdout, dtype=np.int16).astype(float)
-                hsv = parse_audio(audio_data, SAMPLE_RATE, freq_range)
-                await control_device(device, 'set_hsv', *hsv)
-        except asyncio.CancelledError:
-            logging.info(f"Audio task for {device['name']} cancelled.")
-        except Exception as e:
-            logging.error(f"Error in audio processing for {device['name']}: {e}")
-            await control_device(device, 'set_mode', 'white')
-            await control_device(device, 'set_brightness', 1000)
-            raise
-
-    await handle_action_over_devices('set_mode', request_data, 'colour')
-
-    new_tasks = [asyncio.create_task(audio_task(d, f), name=d['name']) for d, f in zip(selected_devices, frequency_ranges)]
-    audio_tasks.extend(new_tasks)
-
-    return jsonify({"status": "success", "message": "Music mode started"})
+    return await music_mode(request_data)
 
 if __name__ == '__main__':
     asyncio.run(load_devices())
