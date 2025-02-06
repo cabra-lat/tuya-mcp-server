@@ -69,22 +69,22 @@ async def control_device(device, action, *args, timeout=0.5, retries=1, **kwargs
 
 async def handle_action_over_devices(action, request_data, *args, **kwargs):
     all_devices = request_data.get('all', False)
-    device_name = request_data.get('device')
+    devices_names = request_data.get('devices', [])
 
     kwargs['nowait'] = kwargs.get('nowait',True)
 
-    if not all_devices and not device_name:
-        return jsonify({"status": "error", "message": "device name must be provided"}), 400
+    if not all_devices and not devices_names:
+        return jsonify({"status": "error", "message": "At least one device name must be provided"}), 400
 
     tasks = []
     for device in devices:
-        if device.get('name') == device_name or all_devices:
+        if device.get('name') in devices_names or all_devices:
             tasks.append(asyncio.create_task(control_device(device, action, *args, **kwargs)))
 
-    if tasks:
-        return jsonify({"status": "success", "message": f"Devices {action} executed."})
-
-    return jsonify({"status": "error", "message": f"Device {device_name} not found"}), 404
+    return jsonify({
+        "status": "success",
+        "message": f"Action {action} executed over {'all devices' if all_devices else 'devices: '}{','.join(devices_names)}."
+    })
 
 def generate_dp27_payload(mode: int,
                           hue: int,
@@ -326,14 +326,14 @@ async def music_mode(request_data):
 
     stop = request_data.get('stop', False)
     all_devices = request_data.get('all', False)
-    device_name = request_data.get('device')
+    devices_names = request_data.get('devices', [])
     
     if stop:
         stop_event.set()
         return jsonify({"status": "success", "message": "Music mode stopped"})
     
     stop_event.clear()
-    selected_devices = [d for d in devices if all_devices or d.get('name') == device_name]
+    selected_devices = [d for d in devices if all_devices or d.get('name') in devices_names]
     if not selected_devices:
         return jsonify({"status": "error", "message": "No matching devices found"}), 404
     
@@ -353,6 +353,7 @@ async def music_mode(request_data):
 
 @app.route('/list', methods=['GET'])
 async def device_list():
+    await load_devices()
     return jsonify([{ 'name': d.get('name'), 'id': d['id'], 'ip': d['ip'], 'version': d["ver"] } for d in devices])
 
 @app.route('/turn_on', methods=['POST'])
@@ -396,7 +397,10 @@ async def music():
     request_data = await request.get_json()
     return await music_mode(request_data)
 
-if __name__ == '__main__':
+def main():
     asyncio.run(load_devices())
     logging.info("Daemon started")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
+if __name__ == '__main__':
+    main()

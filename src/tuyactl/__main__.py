@@ -31,43 +31,43 @@ def main():
 
     # Turn on command
     on_parser = subparsers.add_parser('on', help='Turn on a device')
-    on_parser.add_argument('--device', type=str,  help='Device name')
-    on_parser.add_argument('--all', action='store_true', help='Turn on all devices')
+    on_parser.add_argument('devices', type=str, nargs='*', help='Device(s) name(s)')
+    on_parser.add_argument('--all',   action='store_true', help='Turn on all devices')
 
     # Turn off command
     off_parser = subparsers.add_parser('off', help='Turn off a device')
-    off_parser.add_argument('--device', type=str, help='Device name')
-    off_parser.add_argument('--all', action='store_true', help='Turn off all devices')
+    off_parser.add_argument('devices', type=str, nargs='*', help='Device(s) name(s)')
+    off_parser.add_argument('--all',   action='store_true', help='Turn off all devices')
 
     # Set color command
     color_parser = subparsers.add_parser('color', help='Set the color of a device')
-    color_parser.add_argument('color', type=str, help='Color value')
-    color_parser.add_argument('--device', type=str,  help='Device name')
-    color_parser.add_argument('--all', action='store_true', help='Set color for all devices')
+    color_parser.add_argument('color',   type=str, help='Color value')
+    color_parser.add_argument('devices', type=str, nargs='*', help='Device(s) name(s)')
+    color_parser.add_argument('--all',   action='store_true', help='Set color for all devices')
 
     # Set brightness command
     brightness_parser = subparsers.add_parser('brightness', help='Set the brightness of a device')
     brightness_parser.add_argument('brightness', type=int, help='Brightness value')
-    brightness_parser.add_argument('--device', type=str, help='Device name')
-    brightness_parser.add_argument('--all', action='store_true', help='Set brightness for all devices')
+    brightness_parser.add_argument('devices', nargs='*', type=str, help='Device(s) name(s)')
+    brightness_parser.add_argument('--all',   action='store_true', help='Set brightness for all devices')
 
     # Set colour temperature command
     colourtemp_parser = subparsers.add_parser('temperature', help='Set the colour temperature of a device')
     colourtemp_parser.add_argument('temperature', type=int,  help='Colour temperature value')
-    colourtemp_parser.add_argument('--device', type=str, help='Device name')
-    colourtemp_parser.add_argument('--all', action='store_true', help='Set colour temperature for all devices')
+    colourtemp_parser.add_argument('devices', nargs='*', type=str, help='Device(s) name(s)')
+    colourtemp_parser.add_argument('--all',   action='store_true', help='Set colour temperature for all devices')
 
     # Set mode command
     mode_parser = subparsers.add_parser('mode', help='Set the mode of a device')
     mode_parser.add_argument('mode', type=str, choices=['white', 'colour', 'scene', 'music'], help='Mode value')
-    mode_parser.add_argument('--device', type=str, help='Device name')
-    mode_parser.add_argument('--all', action='store_true', help='Set mode for all devices')
+    mode_parser.add_argument('devices', nargs='*', type=str, help='Device(s) name(s)')
+    mode_parser.add_argument('--all',   action='store_true', help='Set mode for all devices')
 
     # Music sim command
     music_parser = subparsers.add_parser('music', help='Simulate music mode for a device')
-    music_parser.add_argument('--device', type=str, help='Device name')
-    music_parser.add_argument('--all', action='store_true', help='Music mode using all devices')
-    music_parser.add_argument('--stop', action='store_true', help='Stop music mode for selected devices')
+    music_parser.add_argument('devices', nargs='*', type=str, help='Device(s) name(s)')
+    music_parser.add_argument('--all',   action='store_true', help='Music mode using all devices')
+    music_parser.add_argument('--stop',  action='store_true', help='Stop music mode for selected devices')
 
     args = parser.parse_args()
 
@@ -77,63 +77,66 @@ def main():
         endpoint = 'turn_on'
         if args.all:
             parameters["all"] = True
-        elif args.device:
-            parameters["device"] = args.device
+        elif args.devices:
+            parameters["devices"] = args.devices
         else:
-            print("Error: Device name required when not using --all")
+            print("Error: Device(s) name(s) required when not using --all")
             sys.exit(1)
+
     elif args.command == 'off':
         endpoint = 'turn_off'
         if args.all:
             parameters["all"] = True
-        elif args.device:
-            parameters["device"] = args.device
+        elif args.devices:
+            parameters["devices"] = args.devices
         else:
-            print("Error: Device name required when not using --all")
+            print("Error: Device(s) name(s) required when not using --all")
             sys.exit(1)
 
     elif args.command == 'color':
         endpoint = 'set_color'
         if args.all:
             parameters["all"] = True
-        elif hasattr(args, 'device'):
-            parameters["device"] = args.device
-        if hasattr(args, 'color'):
+        elif args.devices:
+            parameters["devices"] = args.devices
+        if args.color:
             parameters["color"] = args.color
 
     elif args.command == 'brightness':
         endpoint = 'set_brightness'
         if args.all:
             parameters["all"] = True
-        elif hasattr(args, 'device'):
-            parameters["device"] = args.device
-        if hasattr(args, 'brightness'):
+        elif args.devices:
+            parameters["devices"] = args.devices
+        if args.brightness:
             parameters["brightness"] = args.brightness
+
     elif args.command == 'temperature':
         endpoint = 'set_temperature'
         if args.all:
             parameters["all"] = True
-        elif hasattr(args, 'device'):
-            parameters["device"] = args.device
-        if hasattr(args, 'temperature'):
+        elif args.devices:
+            parameters["devices"] = args.devices
+        if args.temperature:
             parameters["temperature"] = args.temperature
 
     elif args.command == 'mode':
         endpoint = 'set_mode'
         if args.all:
             parameters["all"] = True
-        elif hasattr(args, 'device'):
-            parameters["device"] = args.device
-        if hasattr(args, 'mode'):
+        elif args.devices:
+            parameters["devices"] = args.devices
+        if args.mode:
             parameters["mode"] = args.mode
 
     elif args.command == 'music':
         if args.all:
             parameters["all"] = True
-        elif hasattr(args, 'device'):
-            parameters["device"] = args.device
-        if hasattr(args, 'stop'):
+        elif args.devices:
+            parameters["devices"] = args.devices
+        if args.stop:
             parameters["stop"] = args.stop 
+
     elif endpoint:
         print("Error: Invalid command")
 

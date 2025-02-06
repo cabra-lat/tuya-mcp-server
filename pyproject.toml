@@ -1,12 +1,11 @@
 [project]
-name = "tuya-mcp-server"
-version = "0.1.5"
-description = "A MCP server for Tuya devices"
+name = "tuyactl"
+version = "0.0.1"
+description = "A server and client cli tool for controlling Tuya devices"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
  "colour>=0.1.5",
- "mcp[cli]>=1.2.1",
  "numpy>=2.2.2",
  "quart>=0.20.0",
  "scipy>=1.15.1",
@@ -16,9 +15,14 @@ dependencies = [
 name = "@cabra.lat"
 email = "admin@cabra.lat"
 
+
+[project.scripts]
+tuyactl = "tuyactl.cli:main"
+tuyad   = "tuyad.__main__:main"
+
 [build-system]
 requires = [ "hatchling",]
 build-backend = "hatchling.build"
 
-[project.scripts]
-tuya-mcp-server = "tuya_mcp_server:main"
+[tool.hatch.build.targets.wheel]
+packages = ["src/tuyactl", "src/tuyad"]

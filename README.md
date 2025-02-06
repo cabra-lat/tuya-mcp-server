@@ -1,123 +1,57 @@
-# tuya_mcp_server MCP server
+# Tuya MCP Client CLI
 
-A MCP server for Tuya devices
+This project provides a command-line interface (`tuyactl`) for controlling Tuya devices. It interacts with a separate Tuya MCP server (not covered in this guide).
 
-Please note this is just a experimental and unstable project.
-So far the daemon and client program controls rgb light bulbs using [tinytuya](https://github.com/jasonacox/tinytuya) library,
-which involves some setup follow the tutorial [here](https://github.com/jasonacox/tinytuya#setup-wizard---getting-local-keys).
-Once you generated your `snapshot.json` place it in your home directory.
-There are ways of configure the snapshot.json location using environment variables (look the head of tuyad script)
+## Requirements
 
-The MCP server may or may not work.
+*   **uv:** A fast and modern Python package installer and runner.  Install it by following the instructions on the [uv documentation site](https://docs.astral.sh/uv/installation/).
+*   **Tuya Local Keys:** You will need the local keys for your Tuya devices. Follow the [tinytuya setup wizard](https://github.com/jasonacox/tinytuya#setup-wizard---getting-local-keys) to obtain these.
 
-<details>
-<summary>Generic default instructions</summary>
-## Components
+## Quick Start
 
-### Resources
+1.  **Install `uv`:**
 
-The server implements a simple note storage system with:
-- Custom note:// URI scheme for accessing individual notes
-- Each note resource has a name, description and text/plain mimetype
+    Follow the official installation instructions on the [uv documentation site](https://docs.astral.sh/uv/installation/). The recommended method is to use the standalone installer, which you can download and run with the following command:
 
-### Prompts
+    ```bash
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ```
 
-The server provides a single prompt:
-- summarize-notes: Creates summaries of all stored notes
-  - Optional "style" argument to control detail level (brief/detailed)
-  - Generates prompt combining all current notes with style preference
+2.  **Obtain Tuya Local Keys:**
 
-### Tools
+    Follow the [tinytuya setup wizard](https://github.com/jasonacox/tinytuya#setup-wizard---getting-local-keys) to get the local keys for your Tuya devices.  Place the resulting `snapshot.json` file in your home directory (`~`). You can customize the location of this file using environment variables (see below).
 
-The server implements one tool:
-- add-note: Adds a new note to the server
-  - Takes "name" and "content" as required string arguments
-  - Updates server state and notifies clients of resource changes
+3.  **Run the server:**
+
+    ```
+    nohup tuyad > tuyad.log 2>&1 &
+    ```
+
+3.  **Run `tuyactl`:**
+
+    To see the available commands and options, run:
+
+    ```bash
+    tuyactl --help
+    ```
+
+    To execute a specific command, use the following syntax:
+
+    ```bash
+    tuyactl <command> [options]
+    ```
+
+    Replace `<command>` with one of the available commands: `list`, `on`, `off`, `color`, `brightness`, `temperature`, `mode`, `music`.  Use the `--
+help` option to see the available options for each command.
+
+    For example, to list all your Tuya devices, run:
+
+    ```bash
+    tuyactl list
+    ```
 
 ## Configuration
 
-[TODO: Add configuration details specific to your implementation]
+*   **`snapshot.json` Location:** You can customize the location of the `snapshot.json` file (containing your Tuya device keys) using environment va
+riables. (Details on this to be added later).
 
-## Quickstart
-
-### Install
-
-#### Claude Desktop
-
-On MacOS: `~/Library/Application\ Support/Claude/claude_desktop_config.json`
-On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
-
-<details>
-  <summary>Development/Unpublished Servers Configuration</summary>
-  ```
-  "mcpServers": {
-    "tuya_mcp_server": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "<path-to-your-development-files>/tuya_mcp_server",
-        "run",
-        "tuya_mcp_server"
-      ]
-    }
-  }
-  ```
-</details>
-
-<details>
-  <summary>Published Servers Configuration</summary>
-  ```
-  "mcpServers": {
-    "tuya_mcp_server": {
-      "command": "uvx",
-      "args": [
-        "tuya_mcp_server"
-      ]
-    }
-  }
-  ```
-</details>
-
-## Development
-
-### Building and Publishing
-
-To prepare the package for distribution:
-
-1. Sync dependencies and update lockfile:
-```bash
-uv sync
-```
-
-2. Build package distributions:
-```bash
-uv build
-```
-
-This will create source and wheel distributions in the `dist/` directory.
-
-3. Publish to PyPI:
-```bash
-uv publish
-```
-
-Note: You'll need to set PyPI credentials via environment variables or command flags:
-- Token: `--token` or `UV_PUBLISH_TOKEN`
-- Or username/password: `--username`/`UV_PUBLISH_USERNAME` and `--password`/`UV_PUBLISH_PASSWORD`
-
-### Debugging
-
-Since MCP servers run over stdio, debugging can be challenging. For the best debugging
-experience, we strongly recommend using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector).
-
-
-You can launch the MCP Inspector via [`npm`](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm) with this command:
-
-```bash
-npx @modelcontextprotocol/inspector uv --directory <path-to-your-development-files>/tuya_mcp_server run tuya-mcp-server
-```
-
-
-Upon launching, the Inspector will display a URL that you can access in your browser to begin debugging.
-
-</details>
