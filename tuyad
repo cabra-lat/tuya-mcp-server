@@ -7,14 +7,14 @@ import subprocess
 import asyncio
 import aiofiles
 import numpy as np
+import time
+import random
+import logging
 from scipy.fft import fft
 from scipy.signal import butter, filtfilt
 from quart import Quart, request, jsonify
 from colour import Color
-import time
-import random
-
-import logging
+from collections import deque
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
@@ -24,11 +24,10 @@ AUDIO_TARGET = os.environ.get('TUYA_MCP_AUDIO_TARGET', 'alsa_output.pci-0000_00_
 CHANNELS    = 2
 SAMPLE_RATE = 48000
 BUFFER_SIZE = SAMPLE_RATE * CHANNELS # 16 bits LE gives 500ms of data
-CHUNK_SIZE  = BUFFER_SIZE // 10
+CHUNK_SIZE  = 1024
 
 app = Quart(__name__)
 devices = []
-audio_queue = asyncio.Queue()
 stop_event = asyncio.Event()
 
 async def load_devices():
@@ -87,22 +86,6 @@ async def handle_action_over_devices(action, request_data, *args, **kwargs):
 
     return jsonify({"status": "error", "message": f"Device {device_name} not found"}), 404
 
-
-def get_hue_for_frequency(fft_data, sample_rate, freq_range):
-    n = len(fft_data)
-    fft_abs = np.abs(fft_data[:n // 2])
-    frequencies = np.fft.fftfreq(n, 1 / sample_rate)[:n // 2]
-    freq_mask = np.logical_and(frequencies >= freq_range[0], frequencies <= freq_range[1])
-    freq_range_values = fft_abs[freq_mask]
-    if len(freq_range_values) == 0: return (0, 1000)
-    dominant_frequency_index = np.argmax(freq_range_values)
-    dominant_frequency = frequencies[freq_mask][dominant_frequency_index]
-    amplitude = freq_range_values[dominant_frequency_index]
-
-    # Determine parameters for Tuya DP27 payload
-    hue = int((dominant_frequency / freq_range[1]) * 360)
-    return hue, 1000 
-
 def generate_dp27_payload(mode: int,
                           hue: int,
                           saturation: int,
@@ -124,92 +107,214 @@ def generate_dp27_payload(mode: int,
     """
     return f"{mode:01X}{hue:04X}{saturation:04X}{brightness:04X}{white_brightness:04X}{temperature:04X}"
 
+from collections import deque
+
+class AsyncDeque(deque):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._not_empty = asyncio.Condition()  # For signaling when items are added
+        self._stopped = False  # To indicate when the deque is stopped
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        async with self._not_empty:
+            while not self and not self._stopped:
+                await self._not_empty.wait()  # Wait until an item is added or stopped
+            if self._stopped and not self:
+                raise StopAsyncIteration
+            return self.popleft()
+
+    async def put(self, item):
+        """Add an item to the deque and notify waiting consumers."""
+        async with self._not_empty:
+            self.append(item)
+            self._not_empty.notify()
+
+    async def stop(self):
+        """Stop all waiting consumers by notifying them."""
+        async with self._not_empty:
+            self._stopped = True
+            self._not_empty.notify_all()
+
+    async def __aenter__(self):
+        """Enter context, returning the deque."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Exit context, ensuring proper cleanup."""
+        await self.stop()
+
+class AudioBufferManager:
+    def __init__(self):
+        self.sample_rate = SAMPLE_RATE
+        self.chunk_size  = CHUNK_SIZE 
+        self.max_buffer_size = 1
+        self.consumers = []
+        self.lock = asyncio.Lock()
+
+    async def add_audio_data(self, data):
+        """Add new audio data to the buffer and all consumer queues"""
+        async with self.lock:
+            # Add to all consumer queues
+            for queue in self.consumers:
+                await queue.put(data)
+
+    def register_consumer(self):
+        """Create a new async generator for a consumer"""
+        queue = AsyncDeque(maxlen=self.max_buffer_size)
+        self.consumers.append(queue)
+        return queue
+
+buffer_manager = AudioBufferManager()
+
 async def audio_reader():
+    global stop_event, buffer_manager
+
     process = await asyncio.create_subprocess_exec(
-        'parec', '-d', AUDIO_TARGET, '--format=s16le', f'--rate={SAMPLE_RATE}',
+        #'parec', f'--device={AUDIO_TARGET}', '--format=s16', f'--rate={SAMPLE_RATE}',
+        'pw-record', f'--target={AUDIO_TARGET}', '--format=s16', f'--rate={SAMPLE_RATE}', '-',
         env={'XDG_RUNTIME_DIR': XDG_RUNTIME_DIR},
-        stdout=asyncio.subprocess.PIPE
+        stdout=asyncio.subprocess.PIPE,
     )
-    while not stop_event.is_set():
-        audio_data = await process.stdout.read(CHUNK_SIZE)
-        if audio_data:
-            await audio_queue.put(audio_data)
+    logging.info("Initializing audio reader task.")
 
-
-async def audio_processor(device, freq_range, *args, timeout=0.5, retries=1, **kwargs):
-    global stop_event, audio_queue
     try:
-        device_id   = device['id']
-        device_name = device['name']
-        local_key   = device['key']
-        ip_address  = device['ip']
-        version     = float(device['ver'])
-
-        d = tinytuya.BulbDevice(
-            device_id,
-            ip_address,
-            local_key,
-            connection_retry_limit=retries,
-            connection_timeout=timeout)
-        d.set_version(version)
-        d.set_socketPersistent(True)
-        d.set_mode('music')
-
-        data = d.status()
-        logging.info(f'Current Status of Bulb: {data}')
-
-        # Parameters for beat detection and processing
-        BEAT_THRESHOLD = 0.3         # Adjust this factor based on experiments
-        RUNNING_AVG_COEFF = 0.975     # For smoothing the volume
-        MIN_BRIGHTNESS = 0
-        MAX_BRIGHTNESS = 1000
-
-        # Choose the FFT window length (number of samples). For 500ms at 48kHz:
-        window_length = int(0.5 * SAMPLE_RATE)  # e.g. 24000 samples for mono
-        full_audio = np.empty(0, dtype=np.float32)  # using float32 since we already cast to float
-        running_avg = 0
-        max_running_avg = 0
-        current_hue = 0
-        current_volume = 0
-        saturation = 1000
-        brightness = 1000
-
-        # Helper functions (as before)
-        def running_average(current_avg, new_value, coeff=RUNNING_AVG_COEFF):
-            return coeff * current_avg + (1 - coeff) * new_value
-
-        def detect_beat(current_volume, running_avg, threshold=BEAT_THRESHOLD):
-            # A beat is detected if the current volume exceeds the running average by the threshold factor.
-            return current_volume > running_avg * threshold
-
-        def get_volume(mono_audio):
-            # Compute RMS volume for the given window
-            return np.sqrt(np.mean(mono_audio ** 2))
-
-        async def change_hue(audio):
-            ## Perform FFT on the window_data
-            #fft_data = np.fft.fft(audio)
-            ## Use the actual sample rate for frequency computation
-            #hue, brightness = get_hue_for_frequency(fft_data, CHUNK_SIZE, freq_range)
-            ## Generate and send the payload
-            hue = random.randint(0,360) 
-            brightness = random.randint(0,1000)
-            value = generate_dp27_payload(0, hue, saturation, brightness)
-            payload = d.generate_payload(tinytuya.CONTROL, {"27": value})
-            logging.info(f" > Sending hue: {hue} sat: {saturation} brightness: {brightness} ({value}) to {device_name}")
-            d.send(payload)
-
         while not stop_event.is_set():
-            audio_buffer = await audio_queue.get()
-            # Convert buffer to numpy array (16-bit samples)
-            audio_array = np.frombuffer(audio_buffer, dtype=np.int16)#.astype(np.float32)
-            # Reshape to stereo and mix down to mono if needed
-            if CHANNELS > 2:
-                audio_array = audio_array.reshape(-1, CHANNELS)
-                mono_audio = np.mean(audio_array, axis=1)
+            chunk = await process.stdout.read(CHUNK_SIZE)
+            #if not any(chunk): logging.info('empty chunk')
+            await buffer_manager.add_audio_data(chunk)
+    except Exception as e:
+        logging.error(f"Audio reader error: {e}")
+        raise
+
+async def audio_consumer(device, freq_range, *args, timeout=0.5, retries=1, **kwargs):
+    global stop_event, buffer_manager
+    consumer = buffer_manager.register_consumer()
+    device_id   = device['id']
+    device_name = device['name']
+    local_key   = device['key']
+    ip_address  = device['ip']
+    version     = float(device['ver'])
+
+    d = tinytuya.BulbDevice(
+        device_id,
+        ip_address,
+        local_key,
+        connection_retry_limit=retries,
+        connection_timeout=timeout)
+    d.set_version(version)
+    d.set_socketPersistent(True)
+    d.set_mode('music')
+
+    status = d.status()
+    error_message = status.get('Error',None)
+    if error_message:
+        logging.error(f'{device_name} error: {error_message}')
+        return
+
+    logging.info(f"{device_name} will handle {freq_range[0]} Hz - {freq_range[1]} Hz")
+
+    # Parameters for beat detection and processing
+    BEAT_THRESHOLD_FACTOR = 1.5  #  Base beat detection threshold.  Dynamic adjustment target.
+    DYNAMIC_ADJUSTMENT_RATE = 0.01 # How quickly the threshold adapts
+    RUNNING_AVG_COEFF = 0.90     # For smoothing the volume (increased responsiveness, was 0.975)
+    MIN_BRIGHTNESS = 0  # Ensure this is never negative.
+    MAX_BRIGHTNESS = 1000
+    MIN_SATURATION = 0
+    MAX_SATURATION = 1000
+    
+    # Beat detection variables
+    history_length = int(SAMPLE_RATE / CHUNK_SIZE)  # 1 second history
+    volume_history = np.zeros(history_length)
+    current_index = 0
+    dynamic_threshold = 0
+    last_beat_time = 0
+
+    # Color rotation parameters
+    sensitivity=1.5       # Beat detection sensitivity (higher = more sensitive)
+    decay_rate=0.97       # How quickly peaks decay over time
+    flash_duration=0.1    # Duration of light flash in seconds
+
+    hue = 0
+    brightness = 0
+    saturation = 0
+
+    def calculate_rms(audio_data):
+        """Calculate root mean square of audio chunk"""
+        return np.sqrt(np.mean(np.square(audio_data)))
+
+    def is_beat(current_volume):
+        """Improved beat detection using dynamic threshold"""
+        nonlocal dynamic_threshold, last_beat_time
+        # Update dynamic threshold
+        dynamic_threshold = decay_rate * dynamic_threshold + (1 - decay_rate) * current_volume
+        
+        # Check if current volume exceeds threshold and cooldown has passed
+        now = time.time()
+        if current_volume > dynamic_threshold * sensitivity and (now - last_beat_time) > flash_duration:
+            last_beat_time = now
+            return True
+        return False
+
+    async def fade_back(device, duration):
+        """Gradual fade back to rhythm-based brightness"""
+        start_time = time.time()
+        while time.time() - start_time < duration:
+            brightness = int(1000 * (1 - (time.time() - start_time)/duration))
+            value = generate_dp27_payload(0, hue, saturation, brightness)
+            payload = device.generate_payload(tinytuya.CONTROL, {"27": value})
+            device.send(payload)
+            await asyncio.sleep(0.05)
+
+    async def fft_analysis(np_audio):
+        # FFT analysis focused on bass frequencies
+        fft_data = np.fft.rfft(np_audio)
+        frequencies = np.fft.rfftfreq(len(np_audio), 1/SAMPLE_RATE)
+        mask = (frequencies >= freq_range[0]) & (frequencies <= freq_range[1])
+        fft_abs = np.abs(fft_data[mask])
+        energy = np.sum(fft_abs)
+        # Convert to dB scale
+        volume_db = 10 * np.log10(energy + 1e-9)  # Add epsilon to avoid log(0)
+
+        max_index = np.argmax(fft_abs)
+        dominant_frequency = frequencies[mask][max_index]
+        
+        return dominant_frequency, volume_db
+
+    try:
+        async for audio_chunk in consumer:
+            if stop_event.is_set(): break
+            np_audio = np.frombuffer(audio_chunk, dtype=np.int16).astype(float)
+
+            frequency, volume = await fft_analysis(np_audio)
+            
+            hue = int(frequency / freq_range[1] * 360) if frequency > 0 else hue
+
+            # Beat detection
+            if is_beat(volume):
+                # Flash on beat
+                brightness = MAX_BRIGHTNESS
+                saturation = MAX_SATURATION
+            
+                # Schedule return to rhythm-based brightness
+                asyncio.create_task(fade_back(d, flash_duration))
             else:
-                mono_audio = audio_array
-            await change_hue(mono_audio)
+                # Base rhythm mode
+                brightness = int(np.clip(volume * 10, 0, 1000))  # Map volume to brightness
+                saturation = 1000
+
+            value = generate_dp27_payload(0, hue, saturation, brightness)  # Full brightness
+            logging.info(f"Sending {value} (" + \
+                         f"H: {hue:03d} " + \
+                         f"S: {saturation:04d} " + \
+                         f"V: {brightness:04d} " + \
+                         f"vol: {volume:10.2f} dB " + \
+                         f"freq: {frequency:10.2f} Hz) " + \
+                         f"to {device_name}")
+            payload = d.generate_payload(tinytuya.CONTROL, {"27": value})
+            d.send(payload)
 
     except Exception as e:
         logging.error(f"Error controlling {device_name or 'unknown device'}: {e}")
@@ -217,7 +322,7 @@ async def audio_processor(device, freq_range, *args, timeout=0.5, retries=1, **k
         raise
 
 async def music_mode(request_data):
-    global stop_event, audio_queue
+    global stop_event
 
     stop = request_data.get('stop', False)
     all_devices = request_data.get('all', False)
@@ -238,9 +343,11 @@ async def music_mode(request_data):
     frequency_ranges = [(minf + i * step, minf + (i + 1) * step) for i in range(len(selected_devices))]
     
     asyncio.create_task(audio_reader())
+
+    tasks = []
     for device, freq_range in zip(selected_devices, frequency_ranges):
-        asyncio.create_task(audio_processor(device, freq_range))
-        logging.info(f"{device.get('name')} will handle {freq_range[0]} Hz - {freq_range[1]} Hz")
+        task = asyncio.create_task(audio_consumer(device, freq_range))
+        tasks.append(task)
     
     return jsonify({"status": "success", "message": "Music mode started"})
 
