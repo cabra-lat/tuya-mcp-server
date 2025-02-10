@@ -1,6 +1,6 @@
-# Tuya MCP Client CLI
+# tuyactl
 
-This project provides a command-line interface (`tuyactl`) for controlling Tuya devices. It interacts with a separate Tuya MCP server (not covered in this guide).
+This project provides a command-line interface (`tuyactl`) for controlling Tuya devices. It interacts with a separate Tuya Server (I'm still thinking a better way of doing that).
 
 ## Requirements
 
